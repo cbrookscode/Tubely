@@ -3,7 +3,11 @@ package main
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -44,12 +48,7 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		respondWithError(w, http.StatusBadRequest, "Unable to parse form file", err)
 		return
 	}
-	medType := header.Header.Get("Content-Type")
-	fileInfo, err := io.ReadAll(file)
-	if err != nil {
-		respondWithError(w, http.StatusInternalServerError, "issue reading file from form", err)
-		return
-	}
+	defer file.Close()
 
 	dbVideo, err := cfg.db.GetVideo(videoID)
 	if err != nil {
@@ -61,13 +60,40 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	videoThumbnails[videoID] = thumbnail{
-		data:      fileInfo,
-		mediaType: medType,
+	mt, _, err := mime.ParseMediaType(header.Header.Get("Content-Type"))
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "issue parsing media type", err)
+		return
+	}
+	if mt != "image/png" && mt != "image/jpeg" {
+		respondWithError(w, http.StatusBadRequest, "non-image provided", nil)
+		return
 	}
 
-	newURL := fmt.Sprintf("http://localhost:<port>/api/thumbnails/{%v}", videoID)
+	uniquePath := filepath.Join(cfg.assetsRoot, videoIDString)
+	ext := strings.TrimPrefix(mt, "image/")
+	path := fmt.Sprintf(uniquePath + "." + ext)
+	fmt.Println(path)
+	newFile, err := os.Create(path)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "issue creating file", err)
+		return
+	}
+	defer newFile.Close()
+
+	_, err = io.Copy(newFile, file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "issue copying data into new file", err)
+		return
+	}
+
+	newURL := fmt.Sprintf("http://localhost:8091/%v", path)
 	dbVideo.ThumbnailURL = &newURL
-	cfg.db.UpdateVideo(dbVideo)
-	respondWithJSON(w, http.StatusOK, struct{}{})
+	err = cfg.db.UpdateVideo(dbVideo)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "issue updating database with new video info", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, dbVideo)
 }
